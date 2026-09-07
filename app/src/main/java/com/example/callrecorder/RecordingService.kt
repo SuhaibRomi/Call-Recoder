@@ -5,8 +5,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
@@ -25,6 +27,8 @@ class RecordingService : Service() {
     private var audioRecord: AudioRecord? = null
     private var isRecording = false
     private var recordingThread: Thread? = null
+    private var audioManager: AudioManager? = null
+    private var originalAudioMode: Int = AudioManager.MODE_NORMAL
 
     private val sampleRate = 16000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
@@ -35,10 +39,24 @@ class RecordingService : Service() {
     private var currentPcmFile: File? = null
     private var currentWavFile: File? = null
 
+    // Tamam possible hardware aur software audio sources
+    private val allPossibleSources = listOf(
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION, // 7
+        MediaRecorder.AudioSource.VOICE_CALL,          // 4
+        MediaRecorder.AudioSource.VOICE_RECOGNITION,   // 6
+        MediaRecorder.AudioSource.VOICE_DOWNLINK,      // 3
+        MediaRecorder.AudioSource.VOICE_UPLINK,        // 2
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) MediaRecorder.AudioSource.UNPROCESSED else MediaRecorder.AudioSource.MIC,
+        MediaRecorder.AudioSource.CAMCORDER,          // 5
+        MediaRecorder.AudioSource.MIC,                 // 1
+        MediaRecorder.AudioSource.DEFAULT              // 0
+    )
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         startForegroundService()
     }
 
@@ -47,12 +65,35 @@ class RecordingService : Service() {
         val callIdentifier = intent?.getStringExtra("CALL_IDENTIFIER") ?: "Unknown"
 
         if (action == "START_RECORDING" && !isRecording) {
-            startAudioRecordCapture(callIdentifier)
+            setupAudioRouting()
+            startUltimateRecording(callIdentifier)
         } else if (action == "STOP_RECORDING" && isRecording) {
             stopAudioRecordCapture()
+            restoreAudioRouting()
             stopSelf()
         }
         return START_NOT_STICKY
+    }
+
+    private fun setupAudioRouting() {
+        try {
+            audioManager?.let { am ->
+                originalAudioMode = am.mode
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun restoreAudioRouting() {
+        try {
+            audioManager?.let { am ->
+                am.mode = originalAudioMode
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun startForegroundService() {
@@ -77,26 +118,40 @@ class RecordingService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun startAudioRecordCapture(callIdentifier: String) {
+    private fun startUltimateRecording(callIdentifier: String) {
         val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-        if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
-            return
+        if (bufferSize <= 0) return
+
+        // 1. Ek ke baad ek tamam sources try honge jab tak working recorder na mil jaye
+        for (source in allPossibleSources) {
+            try {
+                val candidate = AudioRecord(
+                    source,
+                    sampleRate,
+                    channelConfig,
+                    audioFormat,
+                    bufferSize * 4
+                )
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    audioRecord = candidate
+                    break
+                } else {
+                    candidate.release()
+                }
+            } catch (e: Exception) {
+                // Next source par jump karein
+            }
         }
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize * 2
-        )
+        val activeRecorder = audioRecord ?: return
 
-        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+        try {
+            activeRecorder.startRecording()
+            isRecording = true
+        } catch (e: Exception) {
+            e.printStackTrace()
             return
         }
-
-        isRecording = true
-        audioRecord?.startRecording()
 
         val dir = File(getExternalFilesDir(null), "Recordings")
         if (!dir.exists()) dir.mkdirs()
@@ -106,14 +161,24 @@ class RecordingService : Service() {
         currentWavFile = File(dir, "${callIdentifier}_$timestamp.wav")
 
         recordingThread = thread(start = true) {
-            val buffer = ByteArray(bufferSize)
+            val buffer = ShortArray(bufferSize)
             var outputStream: FileOutputStream? = null
             try {
                 outputStream = FileOutputStream(currentPcmFile)
                 while (isRecording) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (read > 0) {
-                        outputStream.write(buffer, 0, read)
+                    val readShorts = activeRecorder.read(buffer, 0, buffer.size)
+                    if (readShorts > 0) {
+                        // 4x Adaptive Software Gain (Both parties audible booster)
+                        val byteData = ByteArray(readShorts * 2)
+                        for (i in 0 until readShorts) {
+                            var sample = (buffer[i] * 3.8f).toInt()
+                            if (sample > Short.MAX_VALUE) sample = Short.MAX_VALUE.toInt()
+                            if (sample < Short.MIN_VALUE) sample = Short.MIN_VALUE.toInt()
+
+                            byteData[i * 2] = (sample and 0xFF).toByte()
+                            byteData[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+                        }
+                        outputStream.write(byteData)
                     }
                 }
             } catch (e: Exception) {
@@ -137,13 +202,12 @@ class RecordingService : Service() {
             recordingThread = null
         }
 
-        // Raw audio ko direct playable .wav file mein convert karein
         val pcm = currentPcmFile
         val wav = currentWavFile
         if (pcm != null && wav != null && pcm.exists()) {
             thread(start = true) {
                 convertRawToWav(pcm, wav)
-                pcm.delete() // temporary file delete
+                pcm.delete()
             }
         }
     }
@@ -213,6 +277,7 @@ class RecordingService : Service() {
 
     override fun onDestroy() {
         stopAudioRecordCapture()
+        restoreAudioRouting()
         super.onDestroy()
     }
 }
