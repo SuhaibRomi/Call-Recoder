@@ -1,137 +1,93 @@
 package com.example.callrecorder
 
-import android.annotation.SuppressLint
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.os.Build
-import android.os.IBinder
-import androidx.core.app.NotificationCompat
-import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlin.concurrent.thread
+import android.database.Cursor
+import android.net.Uri
+import android.provider.ContactsContract
+import android.telephony.TelephonyManager
+import androidx.core.content.ContextCompat
 
-class CallRecordingService : Service() {
+class CallReceiver : BroadcastReceiver() {
 
-    private var audioRecord: AudioRecord? = null
-    private var isRecording = false
-    private var recordingThread: Thread? = null
-
-    private val sampleRate = 16000
-    private val channelConfig = AudioFormat.CHANNEL_IN_MONO
-    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        startForegroundService()
+    companion object {
+        private var lastState = TelephonyManager.CALL_STATE_IDLE
+        private var savedNumber: String? = null
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        if (action == "START_RECORDING" && !isRecording) {
-            startAudioRecordCapture()
-        } else if (action == "STOP_RECORDING" && isRecording) {
-            stopAudioRecordCapture()
-            stopSelf()
-        }
-        return START_NOT_STICKY
-    }
-
-    private fun startForegroundService() {
-        val channelId = "call_recording_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Call Recorder Service",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
-
-        val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Call Recorder Active")
-            .setContentText("Recording normal call audio...")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .build()
-
-        startForeground(1, notification)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startAudioRecordCapture() {
-        val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-        if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_NEW_OUTGOING_CALL) {
+            savedNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER)
             return
         }
 
-        // VOICE_COMMUNICATION hook grabs earpiece internal audio stream directly
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize * 2
-        )
-
-        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            return
+        val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
+        val incomingNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+        if (!incomingNumber.isNullOrEmpty()) {
+            savedNumber = incomingNumber
         }
 
-        isRecording = true
-        audioRecord?.startRecording()
+        var state = TelephonyManager.CALL_STATE_IDLE
+        if (stateStr == TelephonyManager.EXTRA_STATE_OFFHOOK) {
+            state = TelephonyManager.CALL_STATE_OFFHOOK
+        } else if (stateStr == TelephonyManager.EXTRA_STATE_IDLE) {
+            state = TelephonyManager.CALL_STATE_IDLE
+        }
 
-        val dir = File(getExternalFilesDir(null), "Recordings")
-        if (!dir.exists()) dir.mkdirs()
+        onCustomCallStateChanged(context, state, savedNumber)
+    }
 
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val pcmFile = File(dir, "Call_$timestamp.pcm")
+    private fun onCustomCallStateChanged(context: Context, state: Int, number: String?) {
+        if (lastState == state) return
 
-        recordingThread = thread(start = true) {
-            val buffer = ByteArray(bufferSize)
-            var outputStream: FileOutputStream? = null
-            try {
-                outputStream = FileOutputStream(pcmFile)
-                while (isRecording) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (read > 0) {
-                        outputStream.write(buffer, 0, read)
-                    }
+        when (state) {
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                // Call connect hui -> Start Recording with Contact Name / Number
+                val displayName = getContactNameOrNumber(context, number)
+                val serviceIntent = Intent(context, CallRecordingService::class.java).apply {
+                    action = "START_RECORDING"
+                    putExtra("CALL_IDENTIFIER", displayName)
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                outputStream?.flush()
-                outputStream?.close()
+                ContextCompat.startForegroundService(context, serviceIntent)
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                // Call end hui -> Stop Recording
+                val serviceIntent = Intent(context, CallRecordingService::class.java).apply {
+                    action = "STOP_RECORDING"
+                }
+                context.startService(serviceIntent)
+                savedNumber = null
             }
         }
+        lastState = state
     }
 
-    private fun stopAudioRecordCapture() {
-        isRecording = false
+    private fun getContactNameOrNumber(context: Context, number: String?): String {
+        if (number.isNullOrBlank()) return "Unknown"
+
+        var contactName = number
+        val uri: Uri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(number)
+        )
+        val projection = arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME)
+
         try {
-            audioRecord?.stop()
-            audioRecord?.release()
+            val cursor: Cursor? = context.contentResolver.query(uri, projection, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(ContactsContract.PhoneLookup.DISPLAY_NAME)
+                    if (nameIndex != -1) {
+                        contactName = it.getString(nameIndex)
+                    }
+                }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
-        } finally {
-            audioRecord = null
-            recordingThread = null
         }
-    }
 
-    override fun onDestroy() {
-        stopAudioRecordCapture()
-        super.onDestroy()
+        // Clean file name characters (spaces to underscores, remove special chars)
+        return contactName.replace("[^a-zA-Z0-9_+\\s-]".toRegex(), "").trim().replace("\\s+".toRegex(), "_")
     }
 }
