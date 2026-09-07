@@ -31,13 +31,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Call Recording Background Service -->
         <service
             android:name=".RecordingService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
 
-        <!-- Accessibility Service taake Downloaded Apps mein naam show ho -->
+        <!-- Accessibility Service (Downloaded Apps list ke liye zaroori) -->
         <service
             android:name=".CallAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -50,6 +51,7 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- Incoming / Outgoing Call Trigger Receiver -->
         <receiver
             android:name=".CallReceiver"
             android:enabled="true"
