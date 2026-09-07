@@ -43,17 +43,15 @@ class CallReceiver : BroadcastReceiver() {
 
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                // Call connect hui -> Start Recording with Contact Name / Number
                 val displayName = getContactNameOrNumber(context, number)
-                val serviceIntent = Intent(context, CallRecordingService::class.java).apply {
+                val serviceIntent = Intent(context, RecordingService::class.java).apply {
                     action = "START_RECORDING"
                     putExtra("CALL_IDENTIFIER", displayName)
                 }
                 ContextCompat.startForegroundService(context, serviceIntent)
             }
             TelephonyManager.CALL_STATE_IDLE -> {
-                // Call end hui -> Stop Recording
-                val serviceIntent = Intent(context, CallRecordingService::class.java).apply {
+                val serviceIntent = Intent(context, RecordingService::class.java).apply {
                     action = "STOP_RECORDING"
                 }
                 context.startService(serviceIntent)
@@ -79,7 +77,10 @@ class CallReceiver : BroadcastReceiver() {
                 if (it.moveToFirst()) {
                     val nameIndex = it.getColumnIndex(ContactsContract.PhoneLookup.DISPLAY_NAME)
                     if (nameIndex != -1) {
-                        contactName = it.getString(nameIndex)
+                        val fetchedName = it.getString(nameIndex)
+                        if (!fetchedName.isNullOrBlank()) {
+                            contactName = fetchedName
+                        }
                     }
                 }
             }
@@ -87,7 +88,7 @@ class CallReceiver : BroadcastReceiver() {
             e.printStackTrace()
         }
 
-        // Clean file name characters (spaces to underscores, remove special chars)
-        return contactName.replace("[^a-zA-Z0-9_+\\s-]".toRegex(), "").trim().replace("\\s+".toRegex(), "_")
+        val safeName = contactName ?: "Unknown"
+        return safeName.replace("[^a-zA-Z0-9_+\\s-]".toRegex(), "").trim().replace("\\s+".toRegex(), "_")
     }
 }
