@@ -9,10 +9,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -21,14 +21,15 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Build with Gradle
-        run: |
-          gradle init --type basic --dsl kotlin
-          gradle assembleDebug || true
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-      - name: Upload Artifact
+      - name: Build APK
+        run: gradle assembleRelease --stacktrace
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: "**/*.apk"
+          name: CallRecorder-APK
+          path: app/build/outputs/apk/**/*.apk
           
